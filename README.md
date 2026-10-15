@@ -6,6 +6,10 @@ que las fuentes **no respaldan**.
 
 Solo necesitáis **Python 3.9 o superior**. No se instala ni se ejecuta ningún modelo.
 
+> **Giro publicado (15:30):** ya está [`kit/giro_publico.jsonl`](kit/giro_publico.jsonl) (220 casos: normativa e informes técnicos con respuestas largas). Haced `git pull` o descargadlo. Desde ahora cada entrega es **un único CSV con test + giro**:
+>
+> `python generar_predicciones.py --bot mi_bot.py --test test_publico.jsonl giro_publico.jsonl --salida predicciones.csv`
+
 ## 1. Leed el enunciado
 
 **[Enunciado_El_Guardian.docx](Enunciado_El_Guardian.docx)**: el problema, un caso de
