@@ -1,0 +1,43 @@
+class Guardian:
+    def score(self, caso) -> float:
+        peor_score = 0.0  # Asumimos que inicialmente es fiel
+        
+        # Obtenemos los fragmentos pequeños de la respuesta
+        fragmentos = caso["senales"].get("fragmentos", [])
+        
+        # Si por alguna razón no hubiera fragmentos, respaldamos con las oraciones
+        if not fragmentos:
+            oraciones = caso["senales"].get("oraciones", [])
+            for oracion in oraciones:
+                contradiccion_global = oracion.get("contradiccion_todas", 0.0)
+                if contradiccion_global > 0.8:
+                    score_oracion = 0.95
+                else:
+                    mejor_fuente = max(oracion.get("respaldo_por_fuente", [0.0]), default=0.0)
+                    score_oracion = max(0.0, 1.0 - mejor_fuente)
+                peor_score = max(peor_score, score_oracion)
+            return float(peor_score)
+
+        # Recorremos cada fragmento pequeño
+        for fragmento in fragmentos:
+            # Obtenemos la lista de contradicción por fuente para este fragmento
+            contradicciones_fuente = fragmento.get("contradiccion_por_fuente", [0.0])
+            
+            # Cogemos la máxima contradicción entre todas las fuentes para este fragmento
+            max_contradiccion = max(contradicciones_fuente, default=0.0)
+            
+            # Aplicamos la lógica de umbrales (escala 0 a 1: 0.5 para >50 y 0.4 para <40)
+            if max_contradiccion > 0.5:
+                # Probabilidad alta de que la IA esté alucinando
+                score_fragmento = 0.95
+            elif max_contradiccion < 0.4:
+                # Probabilidad baja de alucinación (valor inferior a 0.5)
+                score_fragmento = 0.2
+            else:
+                # Zona gris intermedia
+                score_fragmento = 0.5
+            
+            # Nos quedamos con el peor caso (el fragmento con mayor probabilidad de alucinación)
+            peor_score = max(peor_score, score_fragmento)
+            
+        return float(peor_score)
