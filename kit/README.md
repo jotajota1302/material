@@ -103,8 +103,10 @@ línea por cada caso, sin ids repetidos. Si lo abrís y guardáis con Excel en
 español, lo convertirá a `;` y `0,73` y se rechazará: generadlo siempre con el
 script.
 
-**Cupo de entregas:** 3 antes del giro (solo test) y 3 después (test + giro). Una
-entrega rechazada por formato no gasta cupo.
+**Entregas:** sin límite. Podéis entregar tantas veces como queráis antes y
+después del giro. Ojo: la clasificación final usa vuestra entrega de después del
+giro con mejor nota **pública**, puntuada en la parte **privada**, así que subir
+muchas variantes para afinar contra el leaderboard no os ayuda.
 
 ## Cómo se puntúa
 

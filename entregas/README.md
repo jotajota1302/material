@@ -14,8 +14,8 @@ entregas/
 
 - `NOMBRE_DEL_EQUIPO`: el nombre que os asigne la organización, **siempre el mismo**,
   en minúsculas, sin espacios ni tildes (por ejemplo `los_guardianes`).
-- `entrega_1`, `entrega_2`… numeradas en orden. Cupo: **3 antes del giro** (solo test)
-  y **3 después** (test + giro). Última entrega: **19:00**. Una entrega rechazada por formato no gasta cupo.
+- `entrega_1`, `entrega_2`… numeradas en orden. Sin límite de entregas.
+  Última entrega: **19:00**.
 - No modifiquéis carpetas de otros equipos ni entregas anteriores.
 
 ## 1. Generad el CSV (siempre con el script, nunca con Excel)

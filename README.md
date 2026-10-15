@@ -6,6 +6,10 @@ que las fuentes **no respaldan**.
 
 Solo necesitáis **Python 3.9 o superior**. No se instala ni se ejecuta ningún modelo.
 
+> **Giro publicado (15:30):** ya está [`kit/giro_publico.jsonl`](kit/giro_publico.jsonl) (220 casos: normativa e informes técnicos con respuestas largas). Haced `git pull` o descargadlo. Desde ahora cada entrega es **un único CSV con test + giro**:
+>
+> `python generar_predicciones.py --bot mi_bot.py --test test_publico.jsonl giro_publico.jsonl --salida predicciones.csv`
+
 ## 1. Leed el enunciado
 
 **[Enunciado_El_Guardian.docx](Enunciado_El_Guardian.docx)**: el problema, un caso de
@@ -45,9 +49,9 @@ Copiad `ejemplo_bot.py` a `mi_bot.py`, mejoradlo y medid cada cambio con `evalua
 
 | Hora | Qué pasa |
 |---|---|
-| 10:00 | Presentación técnica del reto. Material disponible. Hasta 3 entregas (solo test). |
+| 10:00 | Presentación técnica del reto. Material disponible. Entregas sin límite (solo test). |
 | 14:15 | Comida. |
-| **15:30** | **Giro:** aparecerá aquí `kit/giro_publico.jsonl`. Desde entonces cada entrega lleva test + giro en un solo CSV. Hasta 3 entregas más. |
+| **15:30** | **Giro:** aparecerá aquí `kit/giro_publico.jsonl`. Desde entonces cada entrega lleva test + giro en un solo CSV. |
 | **19:00** | Cierre de entregas. Se revela la clasificación final. |
 | 19:00–20:15 | Los 5 primeros reproducen su bot sobre un lote nuevo delante del jurado. |
 | **20:30** | Anuncio de los finalistas. |

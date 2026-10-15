@@ -63,6 +63,12 @@ def main(argv=None):
         casos = [c for c in casos if c["id"][0] in "NsTGRH"]
     if args.prefijo:
         casos = [c for c in casos if c["id"].startswith(args.prefijo)]
+    if casos and "etiqueta" not in casos[0]:
+        raise SystemExit(
+            f"{args.datos} no tiene etiquetas, así que no se puede evaluar: es lo que tenéis que predecir.\n"
+            "  Para medir vuestro bot:   python evaluar_local.py --bot mi_bot.py --datos train.jsonl --prefijo H\n"
+            "  Para generar la entrega:  python generar_predicciones.py --bot mi_bot.py "
+            "--test test_publico.jsonl --salida predicciones.csv")
     r = evaluar(_cargar_bot(args.bot), casos)
     print(f"{len(casos)} casos · puntuación {r['puntuacion']:.3f} · AUROC {r['auroc']:.3f} · "
           f"{r['fp']} falsas alarmas · {r['fn']} alucinaciones escapadas")
