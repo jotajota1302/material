@@ -2,13 +2,13 @@
 
 Se genera con `python herramientas/montar_bot.py` (desde kit/) a partir de
 guardian/reglas.py (P), las señales de D (guardian/plantilla_bot.py) y los pesos
-aprendidos en los casos H. Solo usa la librería estándar.
+aprendidos en el train (casos H x3 + otras familias). Solo usa la librería estándar.
 
 Cómo decide: señales del juez LLM y del NLI (peor oración) + reglas de verificación
 (cifras, matices, alcance, causas; y cuentas que cuadran como pista a favor)
 -> regresión logística ponderada 4:1 -> score. Dos modelos según lo que traiga el caso
 (completo / sin juez LLM; sin señales, sospechoso). Cortes óptimos fuera de muestra desplazados
-a 0,5: completo 0.53, sin_llm 0.44.
+a 0,5: completo 0.42, sin_llm 0.55.
 """
 
 # ===========================================================================
@@ -253,10 +253,9 @@ def comprobar_cifras(oracion, fuentes, fuentes_relevantes=None):
     anios = {c["valor"] for c in cifras_f if c["tipo"] == "anio"}
     fechas = {(c["valor"], c["mes"]) for c in cifras_f if c["tipo"] == "fecha"}
     res = {"cifra_nueva": 0.0, "cifra_no_derivable": 0.0, "cifra_dudosa": 0.0, "fecha_nueva": 0.0, "ratio_falso": 0.0,
-           "cifra_de_otra_fuente": 0.0, "cuenta_verificada": 0.0}
+           "cifra_de_otra_fuente": 0.0}
     tomadas = [x for x in cifras_or if x["tipo"] in ("num", "hora") and _cerca(x["valor"], literales, _tolerancia(x))]
     derivados = None
-    calculadas = 0
     for c in cifras_or:
         if c["tipo"] == "anio":
             if c["valor"] not in anios:
@@ -307,13 +306,41 @@ def comprobar_cifras(oracion, fuentes, fuentes_relevantes=None):
         elif c.get("pct") and len(tomadas) >= 2 and not _derivable(c, tol, (1,), _derivados([t["valor"] for t in tomadas], None)):
             # «812 de 1.326, más del 70 %»: el porcentaje debe salir de las cifras de la frase
             res["cifra_no_derivable"] = 1.0
-        else:
-            calculadas += 1
-    # Pista POSITIVA: la oración hace cuentas y todas cuadran con las fuentes. El NLI
-    # no sabe hacer cuentas («suman 8 de los 15») y da poco respaldo a estas frases fieles.
-    if calculadas and not (res["cifra_no_derivable"] or res["cifra_dudosa"] or res["ratio_falso"]):
-        res["cuenta_verificada"] = 1.0
     return res
+
+
+def cuenta_verificada(oracion, fuentes, clausulas):
+    """Pista A FAVOR: la oración hace cuentas («suman 8 de los 15») y TODAS salen de
+    una operación entre dos cifras de las cláusulas relevantes (o de las que la propia
+    oración toma de las fuentes). El NLI no sabe hacer cuentas y da poco respaldo a
+    estas frases aunque sean fieles.
+
+    Es deliberadamente estricta (pares, sin tríos, solo cláusulas relevantes): con
+    todas las cifras de varias fuentes, una cifra FALSA «cuadraba» por azar el ~27 %
+    de las veces; así, el ~15 %.
+    """
+    cifras_or = extraer_cifras(oracion)
+    literales = sorted(c["valor"] for f in fuentes for c in extraer_cifras(f))
+    tomadas = [x["valor"] for x in cifras_or if x["tipo"] in ("num", "hora") and _cerca(x["valor"], literales, _tolerancia(x))]
+    calculadas = [x for x in cifras_or if x["tipo"] == "num" and not _cerca(x["valor"], literales, _tolerancia(x))
+                  and not (x["texto"] in PALABRAS_NUM and x["valor"] <= 3)]
+    if not calculadas:
+        return 0.0
+    pool = [x["valor"] for c in clausulas for x in extraer_cifras(c) if x["tipo"] in ("num", "hora")] + tomadas
+    if len(set(pool)) > 25:  # demasiadas cifras: cualquier número cuadraría, no se verifica
+        return 0.0
+    derivados = _solo_pares(pool)
+    return float(all(_derivable(x, _tolerancia(x), (1,), derivados) for x in calculadas))
+
+
+def _solo_pares(pool):
+    vals = sorted(set(v for v in pool if v) | {100.0})
+    out = set(vals)
+    out.update(100 - v for v in vals if 0 < v < 100)
+    for i, a in enumerate(vals):
+        for b in vals[i + 1:]:
+            out.update(_ops(a, b))
+    return sorted(out)
 
 
 def _derivable(c, tol, escalas, derivados):
@@ -573,6 +600,7 @@ def caracteristicas_reglas(oracion, fuentes_relevantes, fuentes, pregunta=""):
         return res
     relevantes = clausulas_relevantes(oracion, fuentes_relevantes)
     res.update(comprobar_cifras(oracion, fuentes, fuentes_relevantes))
+    res["cuenta_verificada"] = cuenta_verificada(oracion, fuentes, relevantes)
     res.update(matices_perdidos(oracion, relevantes))
     res["aproximacion_perdida"] = aproximacion_perdida(oracion, relevantes)
     res.update(alcance(oracion, relevantes))
@@ -605,17 +633,39 @@ def _oraciones(caso):
     return [{"texto": p} for p in partes if p.strip()]
 
 
+def _respaldo(o):
+    vals = [v for v in (o.get("respaldo_por_fuente") or []) if isinstance(v, (int, float))]
+    return max(vals) if vals else None
+
+
 def reglas_caso(caso, estricto=False):
     """Pistas del caso completo: el máximo de cada pista sobre todas las oraciones
-    (una sola afirmación falsa basta, así que no se promedia)."""
+    (una sola afirmación falsa basta, así que no se promedia).
+
+    Excepción: cuenta_verificada es una pista A FAVOR y solo cuenta en la oración
+    más sospechosa (la de menos respaldo del NLI): que una frase haga bien sus cuentas
+    no debe tranquilizar sobre otra frase distinta. Sin datos del NLI, tienen que
+    cuadrar las cuentas de todas las oraciones que las hagan.
+    """
     fuentes = caso.get("fuentes") or []
     total = dict.fromkeys(NOMBRES, 0.0)
     try:
-        for o in _oraciones(caso):
+        oraciones = _oraciones(caso)
+        por_oracion = []
+        for o in oraciones:
             r = caracteristicas_reglas(o.get("texto", ""), _fuentes_relevantes(o, fuentes),
                                        fuentes, caso.get("pregunta", ""))
+            por_oracion.append(r)
             for k, v in r.items():
                 total[k] = max(total[k], v)
+        respaldos = [_respaldo(o) for o in oraciones]
+        if por_oracion and all(r is not None for r in respaldos):
+            peor = min(range(len(oraciones)), key=lambda i: respaldos[i])
+            total["cuenta_verificada"] = por_oracion[peor]["cuenta_verificada"]
+        elif por_oracion:
+            con_cuentas = [r["cuenta_verificada"] for r, o in zip(por_oracion, oraciones)
+                           if any(x["tipo"] == "num" for x in extraer_cifras(o.get("texto", "")))]
+            total["cuenta_verificada"] = min(con_cuentas) if con_cuentas else 0.0
     except Exception:
         if estricto:  # al medir queremos ver el fallo
             raise
@@ -631,13 +681,19 @@ import unicodedata
 
 
 SENALES_LLM = ["llm_no_respaldada", "llm_contradicha", "llm_confianza_duda"]
-SENALES_NLI = ["nli_min_respaldo", "frag_min_respaldo"]
-# Fuera: nli_max_contradiccion y nli_respaldo_todas_min. En H no distinguen (AUROC ~0,5)
-# y el modelo les daba pesos con el signo al revés: era ruido.
+SENALES_NLI = ["frag_min_respaldo", "frac_resp"]
+# Fuera: nli_max_contradiccion y nli_respaldo_todas_min (en H no distinguen, AUROC ~0,5) y
+# nli_min_respaldo (junto a frac_resp salía con el signo al revés). Pesos al revés = ruido.
+# frac_resp = fracción de oraciones con respaldo NLI >= 0,5: en respuestas largas siempre
+# hay alguna frase floja para el NLI; «la peor frase» sola acusaba a muchas fieles.
+
+# Reglas de P que entran al modelo: las RECOMENDADAS menos tres que casi no pesaban
+# (aproximacion_perdida, ratio_falso, cifra_dudosa) y salían con pesos nulos o al revés.
+REGLAS_MODELO = [k for k in RECOMENDADAS if k not in ("aproximacion_perdida", "ratio_falso", "cifra_dudosa")]
 
 MODELOS = {
-    "completo": SENALES_LLM + SENALES_NLI + RECOMENDADAS,
-    "sin_llm": SENALES_NLI + RECOMENDADAS,
+    "completo": SENALES_LLM + SENALES_NLI + REGLAS_MODELO,
+    "sin_llm": SENALES_NLI + REGLAS_MODELO,
 }
 # Sin LLM ni NLI no hay modelo: uno «solo reglas» daba −0,05 fuera de H (peor que
 # marcarlo todo), así que en ese caso se marca como sospechoso (puntuación 0 asegurada).
@@ -685,6 +741,7 @@ def caracteristicas_senales(caso):
     no_resp = contra = duda = 0.0
     hay_llm = False
     min_resp = None
+    respaldos = []
     for o in oraciones:
         llm = o.get("llm") or {}
         ver = _veredicto(llm.get("veredicto"))
@@ -701,6 +758,7 @@ def caracteristicas_senales(caso):
         m = _max(o.get("respaldo_por_fuente"))
         if m is not None:
             min_resp = m if min_resp is None else min(min_resp, m)
+            respaldos.append(m)
     frag = None
     for f in fragmentos:
         m = _max(f.get("respaldo_por_fuente"))
@@ -710,10 +768,13 @@ def caracteristicas_senales(caso):
         min_resp = frag
     if frag is None:
         frag = min_resp
+    if not respaldos:  # sin oraciones: la fracción se calcula sobre los fragmentos
+        respaldos = [m for m in (_max(f.get("respaldo_por_fuente")) for f in fragmentos) if m is not None]
     hay_nli = min_resp is not None
+    frac = sum(r >= 0.5 for r in respaldos) / len(respaldos) if respaldos else 0.0
     return {"llm_no_respaldada": no_resp, "llm_contradicha": contra, "llm_confianza_duda": duda,
             "nli_min_respaldo": min_resp if hay_nli else 0.0, "frag_min_respaldo": frag if hay_nli else 0.0,
-            "hay_llm": hay_llm, "hay_nli": hay_nli}
+            "frac_resp": frac, "hay_llm": hay_llm, "hay_nli": hay_nli}
 
 
 def caracteristicas(caso):
@@ -735,17 +796,17 @@ def vector(d, modelo):
 
 # === PARAMETROS (los escribe herramientas/montar_bot.py) ===
 PARAMS = {
-    'completo': {  # corte 0.53 desplazado a 0,5
-        "media": [0.059509, 0.127924, 0.030032, 0.409474, 0.484867, 0.050713, 0.045959, 0.00317, 0.244057, 0.064976, 0.079239, 0.063391, 0.034865, 0.00317, 0.052298, 0.045959, 0.049128, 0.011094],
-        "desv": [0.218582, 0.326624, 0.040087, 0.38843, 0.387036, 0.219411, 0.209396, 0.05621, 0.429527, 0.246484, 0.270112, 0.243666, 0.183439, 0.05621, 0.222627, 0.209396, 0.216136, 0.10474],
-        "coef": [0.722554, 1.340793, 0.631684, -0.176356, -0.554745, 0.540641, 0.070281, 0.056413, -0.785944, 0.387702, 0.46382, 0.385374, 0.142622, 0.131769, 0.474411, 0.35346, 0.093844, 0.140709],
-        "sesgo": 1.243455,
+    'completo': {  # corte 0.42 desplazado a 0,5
+        "media": [0.087797, 0.24, 0.025689, 0.387632, 0.317551, 0.050713, 0.130745, 0.041204, 0.041997, 0.038035, 0.024564, 0.032488, 0.034073, 0.043582, 0.010301],
+        "desv": [0.263114, 0.415673, 0.036764, 0.385691, 0.448661, 0.219411, 0.337121, 0.198763, 0.200582, 0.19128, 0.154793, 0.177293, 0.181416, 0.204162, 0.10097],
+        "coef": [1.058842, 2.170544, 0.664897, -0.418675, -0.2285, 0.655825, -0.957813, 0.349434, 0.393197, 0.360301, 0.150477, 0.377837, 0.309631, 0.165688, 0.1619],
+        "sesgo": 2.225781,
     },
-    'sin_llm': {  # corte 0.44 desplazado a 0,5
-        "media": [0.409474, 0.484867, 0.050713, 0.045959, 0.00317, 0.244057, 0.064976, 0.079239, 0.063391, 0.034865, 0.00317, 0.052298, 0.045959, 0.049128, 0.011094],
-        "desv": [0.38843, 0.387036, 0.219411, 0.209396, 0.05621, 0.429527, 0.246484, 0.270112, 0.243666, 0.183439, 0.05621, 0.222627, 0.209396, 0.216136, 0.10474],
-        "coef": [-0.477173, -0.49107, 0.479566, 0.024591, 0.015569, -0.868186, 0.317842, 0.373261, 0.33875, 0.186139, 0.213857, 0.436973, 0.287623, 0.138776, 0.155897],
-        "sesgo": 1.480688,
+    'sin_llm': {  # corte 0.55 desplazado a 0,5
+        "media": [0.387632, 0.317551, 0.050713, 0.130745, 0.041204, 0.041997, 0.038035, 0.024564, 0.032488, 0.034073, 0.043582, 0.010301],
+        "desv": [0.385691, 0.448661, 0.219411, 0.337121, 0.198763, 0.200582, 0.19128, 0.154793, 0.177293, 0.181416, 0.204162, 0.10097],
+        "coef": [-0.582289, -0.384922, 0.541176, -0.913897, 0.237332, 0.287059, 0.275414, 0.180625, 0.313232, 0.231861, 0.15369, 0.145193],
+        "sesgo": 1.18521,
     },
 }
 # === FIN PARAMETROS ===
