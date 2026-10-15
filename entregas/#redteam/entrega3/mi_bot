@@ -1,0 +1,57 @@
+import re
+
+class Guardian:
+    def score(self, caso):
+        senales = caso.get("senales", {})
+        oraciones = senales.get("oraciones", [])
+        fragmentos = senales.get("fragmentos", [])
+        
+        if not oraciones:
+            return 0.0  # Si no hay oraciones, asumimos fiel por defecto
+        
+        # 1. Extraer universo de números de las fuentes para evitar distorsiones numéricas
+        fuentes_texto = " ".join(caso.get("fuentes", []))
+        numeros_fuentes = set(re.findall(r'\b\d+[\d.,]*\b', fuentes_texto))
+        
+        peor_score_oraciones = 1.0
+        riesgo_acumulado = 0.0
+        
+        for oracion in oraciones:
+            # Respaldo NLI base
+            mejor_respaldo = max(oracion.get("respaldo_por_fuente", [0.0]), default=0.0)
+            contradiccion = max(oracion.get("contradiccion_por_fuente", [0.0]), default=0.0)
+            
+            # Verificación del juez LLM si está disponible
+            llm_info = oracion.get("llm", {})
+            confianza_llm = llm_info.get("confianza", 1.0) if llm_info.get("veredicto") == "respaldada" else 0.0
+            
+            # Chequeo de distorsión numérica dentro de la oración
+            numeros_oracion = set(re.findall(r'\b\d+[\d.,]*\b', oracion.get("texto", "")))
+            distorsion_numerica = any(num not in numeros_fuentes for num in numeros_oracion)
+            
+            # Calcular riesgo base para esta oración (penalizando contradicción o falta de respaldo)
+            riesgo_oracion = 1.0 - mejor_respaldo
+            
+            if contradiccion > 0.4:
+                riesgo_oracion = max(riesgo_oracion, 0.9)  # Alta penalización por contradicción
+                
+            if distorsion_numerica:
+                riesgo_oracion = max(riesgo_oracion, 0.85) # Penalización fuerte por inventar cifras/datos
+                
+            # Ajuste con la confianza del juez LLM (si el juez duda, aumentamos el riesgo)
+            if llm_info.get("veredicto") != "respaldada":
+                riesgo_oracion = max(riesgo_oracion, 0.7)
+                
+            peor_score_oraciones = min(peor_score_oraciones, 1.0 - riesgo_oracion)
+            riesgo_acumulado = max(riesgo_acumulado, riesgo_oracion)
+
+        # 2. Análisis por fragmentos para cazar incisos no respaldados o sobregeneralizaciones
+        peor_fragmento = 1.0
+        for frag in fragmentos:
+            respaldo_frag = max(frag.get("respaldo_por_fuente", [0.0]), default=0.0)
+            peor_fragmento = min(peor_fragmento, respaldo_frag)
+            
+        # Combinación ponderada final para evitar falsas alarmas masivas pero castigar alucinaciones
+        score_final = max(riesgo_acumulado, 1.0 - peor_fragmento)
+        
+        return float(min(1.0, max(0.0, score_final)))
