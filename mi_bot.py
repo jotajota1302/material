@@ -6,6 +6,10 @@ DE_RE = re.compile(r'(\d+)\s+de\s+(los|las|\d+)', re.I)
 NUM_RE = re.compile(r'\d+(?:[.,]\d+)?')
 
 NUMWORDS = {'cero':0,'uno':1,'una':1,'dos':2,'tres':3,'cuatro':4,'cinco':5,'seis':6,'siete':7,'ocho':8,'nueve':9,'diez':10,'once':11,'doce':12,'trece':13,'catorce':14,'quince':15,'dieciseis':16,'dieciocho':18,'diecinueve':19,'veinte':20,'treinta':30,'cuarenta':40,'cincuenta':50,'sesenta':60,'setenta':70,'ochenta':80,'noventa':90,'cien':100,'ciento':100,'mil':1000}
+
+HEDGE_RE = re.compile(r'(podr[íi]a|podr[íi]an|puede(n)?|posible(mente)?|probable(mente)?|si se cumple|si llueve|condicionad\w*|siempre que)', re.I)
+UNIT_RE = re.compile(r'(\d+(?:[.,]\d+)?)\s*(millones?|miles?|millar\w*|p[aá]ginas?|documentos?|toneladas?|kilos?|euros?|c[eé]ntimos?|metros?|km|tiendas?|\xe1rboles?|ejemplares?|a[ñn]os?|meses|d[íi]as?)', re.I)
+
 def _norm_nums(s):
     out = s
     for w,v in NUMWORDS.items():
@@ -134,6 +138,64 @@ class Guardian:
                             allp = False; break
                     if allp:
                         base -= 0.40
+        except Exception:
+            pass
+        # 1) unidad cambiada: mismo numero, distinta unidad (paginas->documentos)
+        try:
+            runs = set((m.group(1).replace(',', '.'), (m.group(2) or '').lower()) for m in UNIT_RE.finditer(rlow))
+            funits = set((m.group(1).replace(',', '.'), (m.group(2) or '').lower()) for m in UNIT_RE.finditer(flow))
+            rnums = dict()
+            for n, u in runs:
+                rnums.setdefault(n, set()).add(u)
+            funits_by_n = dict()
+            for n, u in funits:
+                funits_by_n.setdefault(n, set()).add(u)
+            for n, us in rnums.items():
+                if n in funits_by_n and not (us & funits_by_n[n]):
+                    base += 0.50
+                    break
+        except Exception:
+            pass
+        # 2) cuenta casi: numero cercano (±12%) a un derivable pero no exacto
+        try:
+            fflat = flow.replace(',', '.')
+            sv = []
+            for x in NUM_RE.findall(fflat):
+                try: sv.append(float(x.replace(',', '.')))
+                except Exception: pass
+            deriv = set([round(v, 2) for v in sv])
+            for i in range(min(len(sv), 10)):
+                for j in range(min(len(sv), 10)):
+                    if i == j: continue
+                    deriv.add(round(sv[i]+sv[j], 2)); deriv.add(round(abs(sv[i]-sv[j]), 2))
+            nearmiss = False
+            for n in NUM_RE.findall(rlow):
+                nn = n.replace(',', '.')
+                if nn in fflat: continue
+                try: v = float(nn)
+                except Exception: continue
+                if v == 0: continue
+                for d in deriv:
+                    if d and abs(v-d)/abs(d) < 0.12 and round(v, 2) != round(d, 2):
+                        nearmiss = True; break
+                if nearmiss: break
+            if nearmiss:
+                base += 0.45
+        except Exception:
+            pass
+        # 3) matiz caido: fuente con podria/si y respuesta sin ellos pero mismo nucleo
+        try:
+            if HEDGE_RE.search(flow) and not HEDGE_RE.search(rlow):
+                rtoks2 = set(x for x in _toks(rlow) if len(x) >= 5)
+                hit = False
+                for fsrc in fuentes:
+                    sfl = _norm_nums(fsrc.lower())
+                    if not HEDGE_RE.search(sfl): continue
+                    st2 = set(x for x in _toks(sfl) if len(x) >= 5)
+                    if rtoks2 and len(rtoks2 & st2)/max(1, len(rtoks2)) >= 0.45:
+                        hit = True; break
+                if hit:
+                    base += 0.40
         except Exception:
             pass
         lo, hi = -0.57, 2.00
