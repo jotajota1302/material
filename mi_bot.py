@@ -33,10 +33,14 @@ class Guardian:
             sim = max(o.get('similitud_por_fuente', [0]) or [0])
             gap = sim - (rb if rb > rt else rt)
             v = (o.get('llm') or {}).get('veredicto')
+            cf = (o.get('llm') or {}).get('confianza') or 0
             m = rt if rt < rb else rb
             if v == 'contradicha': lr = 1.0
             elif v == 'no_respaldada': lr = 0.85
-            elif v == 'respaldada': lr = 0.60 if m < 0.30 else (0.30 if m < 0.50 else 0.05)
+            elif v == 'respaldada':
+                if m >= 0.50: lr = 0.05
+                elif m >= 0.30: lr = 0.30 if cf < 0.95 else 0.12
+                else: lr = 0.60 if cf < 0.95 else 0.25
             else: lr = 0.50
             s = 0.06*(1.0-rt) + 0.34*(1.0-rb) + 0.06*ct + 1.27*lr + 0.50*(gap if gap > 0 else 0)
             per.append(s)
@@ -198,7 +202,7 @@ class Guardian:
                     base += 0.40
         except Exception:
             pass
-        lo, hi = -0.57, 2.00
+        lo, hi = -1.29, 2.00
         s = (base - lo) / (hi - lo)
         if s < 0: s = 0.0
         if s > 1: s = 1.0
