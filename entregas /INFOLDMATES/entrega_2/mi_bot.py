@@ -1,0 +1,421 @@
+"""Guardian: cuatro detectores (distorsion, contradiccion, no_respaldado,
+sobregeneralizacion) que alimentan, junto con otras señales, una regresión
+logística entrenada en train.jsonl (coeficientes incrustados abajo).
+Solo librería estándar. score() ya devuelve el corte en 0.5."""
+import math
+import re
+import unicodedata
+
+STOP = set("el la los las un una unos unas de del al y o en a con por para que se su sus es son fue fueron ha han lo le les como mas pero sin sobre entre the".split())
+QUANT_UP = set("todos todas todo toda siempre nunca ningun ninguna cualquier cada totalidad mayoria all every ever total always never none any each majority".split())
+QUANT_DOWN = set("solo solamente algunos algunas varios varias aproximadamente alrededor casi only just some various approximately around almost".split())
+
+
+def _norm(s):
+    s = unicodedata.normalize("NFD", s.lower())
+    return "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+
+
+def _toks(s):
+    return re.findall(r"[a-z0-9]+", _norm(s))
+
+
+
+
+FQ_DOWN = set("solo solamente algunos algunas varios varias unos unas aproximadamente alrededor cerca casi mas menos".split())
+
+MODELO = {"keys": ["cap_new", "cit_resp_max", "cit_resp_mean", "cit_resp_min", "det_contra", "det_dist", "det_nores", "det_sobre", "fr_best_contra_max", "fr_best_contra_mean", "fr_best_contra_min", "fr_best_src_max", "fr_best_src_mean", "fr_best_src_min", "fr_contra_todas_max", "fr_contra_todas_mean", "fr_contra_todas_min", "fr_resp_todas_max", "fr_resp_todas_mean", "fr_resp_todas_min", "llm_contra", "llm_none", "llm_nores", "llm_res_minconf", "nov_frac", "novc_frac", "num_all_in_cit", "num_miss", "num_miss_cit", "or_best_contra_max", "or_best_contra_mean", "or_best_contra_min", "or_best_src_max", "or_best_src_mean", "or_best_src_min", "or_contra_todas_max", "or_contra_todas_mean", "or_contra_todas_min", "or_resp_todas_max", "or_resp_todas_mean", "or_resp_todas_min", "or_sim_max", "or_sim_mean", "or_sim_min", "q_down_lost"], "mu": [0.01933, 0.35079, 0.32504, 0.28855, 0.27172, 0.23067, 0.61297, 0.06034, 0.61818, 0.45022, 0.2814, 0.76034, 0.60053, 0.39333, 0.4006, 0.25829, 0.1499, 0.72241, 0.53973, 0.33623, 0.26929, 0.00293, 0.10217, 0.97933, 0.22472, 0.39563, 0.40715, 0.24253, 0.73404, 0.45317, 0.42403, 0.39754, 0.4211, 0.38276, 0.33356, 0.35008, 0.32291, 0.30543, 0.45971, 0.4164, 0.37169, 0.8036, 0.78329, 0.76149, 0.0867], "sd": [0.14595, 0.43311, 0.40676, 0.40363, 0.36931, 0.26496, 0.32969, 0.18187, 0.40469, 0.3357, 0.35289, 0.36825, 0.33427, 0.4025, 0.42096, 0.3192, 0.31305, 0.38729, 0.34603, 0.4091, 0.43406, 0.05404, 0.28527, 0.03432, 0.19339, 0.26705, 0.4913, 0.44603, 0.8884, 0.41141, 0.39702, 0.40474, 0.41773, 0.38577, 0.38974, 0.41551, 0.40019, 0.40592, 0.43536, 0.40853, 0.41867, 0.12931, 0.12846, 0.16863, 0.29955], "coef": [0.4164, -0.0569, -0.0683, 0.0179, 0.5266, -0.0944, 0.7657, -0.1808, 0.2362, -0.265, 0.0084, 0.3301, -0.325, -0.1664, -0.2377, -0.0031, 0.0275, 0.2331, -0.3131, -0.0633, 1.3494, 0.2151, 0.8949, -0.593, -0.6928, -0.3558, 0.1171, -0.2954, -0.0699, -0.272, 0.1273, 0.1695, 0.2153, -0.0655, -0.1686, -0.2254, -0.0762, 0.0887, -0.1067, 0.0254, 0.1477, 0.0262, -0.0616, 0.0003, 0.2134], "b": 0.6464, "T": 0.15}
+
+
+
+def _nums(s):
+    """Normaliza cifras con separadores de miles o decimales habituales."""
+    out = set()
+
+    for m in re.findall(r"\d+(?:[.,]\d+)*", s):
+        if re.fullmatch(r"\d{1,3}(?:\.\d{3})+", m):
+            value = str(int(m.replace(".", "")))
+        elif re.fullmatch(r"\d{1,3}(?:,\d{3})+", m):
+            value = str(int(m.replace(",", "")))
+        else:
+            value = m.replace(",", ".")
+
+        out.add(value)
+
+    return out
+
+
+class Guardian:
+    UMBRAL = 0.5
+
+    def _llm(self, o):
+        """Devuelve (veredicto, confianza, índice de fuente)."""
+        l = o.get("llm") or {}
+        c = l.get("confianza")
+        try:
+            c = float(c) if c is not None else 0.0
+        except (TypeError, ValueError):
+            c = 0.0
+
+        c = max(0.0, min(1.0, c))
+        return l.get("veredicto"), c, l.get("fuente")
+
+    def _fuentes_citadas(self, caso):
+        """Usa fuentes citadas válidas; si no hay ninguna, usa todas."""
+        fuentes = caso["fuentes"]
+        idx = set()
+
+        for o in caso["senales"]["oraciones"]:
+            i = self._llm(o)[2]
+            if (
+                isinstance(i, int)
+                and not isinstance(i, bool)
+                and 0 <= i < len(fuentes)
+            ):
+                idx.add(i)
+
+        if not idx:
+            return " ".join(fuentes)
+
+        return " ".join(fuentes[i] for i in sorted(idx))
+
+    # --------------------------------------------------
+    # Detectores heurísticos
+    # --------------------------------------------------
+
+    def distorsion(self, caso):
+        """
+        Señal conservadora de cifras ausentes.
+        No presupone que toda cifra nueva sea incorrecta:
+        puede proceder de un cálculo válido.
+        """
+        respuesta = _nums(caso["respuesta"])
+        if not respuesta:
+            return 0.5
+
+        todas = _nums(" ".join(caso["fuentes"]))
+        citadas = _nums(self._fuentes_citadas(caso))
+
+        faltan_todas = respuesta - todas
+        faltan_citadas = respuesta - citadas
+
+        # Penalización baja: las cifras derivadas pueden ser válidas.
+        puntuacion = (
+            0.25 * len(faltan_todas)
+            + 0.10 * len(faltan_citadas - faltan_todas)
+        )
+        return min(1.0, puntuacion)
+
+    def no_respaldado(self, caso):
+        """
+        Combina el LLM, NLI por fuente, NLI conjunto y fragmentos.
+        La novedad léxica es una señal secundaria, no una prueba.
+        """
+        senales = caso["senales"]
+        oraciones = senales["oraciones"]
+        fragmentos = senales["fragmentos"]
+
+        if not oraciones:
+            return 0.5
+
+        soportes = []
+
+        for i, o in enumerate(oraciones):
+            veredicto, confianza, _ = self._llm(o)
+
+            # Solo el veredicto respaldada cuenta como soporte positivo.
+            # Los otros dos veredictos se distinguen en contradiccion().
+            if veredicto == "respaldada":
+                soporte_llm = confianza
+            elif veredicto in ("no_respaldada", "contradicha"):
+                soporte_llm = 1.0 - confianza
+            else:
+                soporte_llm = 0.5
+
+            por_fuente = o.get("respaldo_por_fuente") or [0.0]
+            mejor_fuente = max(por_fuente)
+
+            # No usar index(o): puede asignar fragmentos a otra oración.
+            frs = [
+                frag for frag in fragmentos
+                if frag.get("oracion") == i
+            ]
+
+            # El soporte conjunto puede rescatar una frase que combina
+            # información de varias fuentes.
+            if frs:
+                soportes_frag = [
+                    max(
+                        frag.get("respaldo_por_fuente") or [0.0]
+                        + [frag.get("respaldo_todas", 0.0)]
+                    )
+                    for frag in frs
+                ]
+                soporte_frag = min(soportes_frag)
+            else:
+                soporte_frag = mejor_fuente
+
+            soporte_todas = o.get("respaldo_todas", 0.0)
+
+            soporte = (
+                0.35 * soporte_llm
+                + 0.25 * mejor_fuente
+                + 0.25 * soporte_frag
+                + 0.15 * soporte_todas
+            )
+            soportes.append(max(0.0, min(1.0, soporte)))
+
+        peor_soporte = min(soportes)
+
+        # Novedad léxica: peso reducido para tolerar paráfrasis.
+        palabras_fuente = {
+            t[:5] for t in _toks(" ".join(caso["fuentes"]))
+        }
+        palabras_respuesta = [
+            t for t in _toks(caso["respuesta"])
+            if t not in STOP and not t.isdigit()
+        ]
+
+        novedad = (
+            sum(
+                1 for t in palabras_respuesta
+                if t[:5] not in palabras_fuente
+            )
+            / max(1, len(palabras_respuesta))
+        )
+
+        return min(
+            1.0,
+            0.90 * (1.0 - peor_soporte) + 0.10 * novedad
+        )
+
+    def contradiccion(self, caso):
+        """Mantiene separada la contradicción del simple no respaldo."""
+        peor = 0.0
+
+        for o in caso["senales"]["oraciones"]:
+            veredicto, confianza, idx = self._llm(o)
+            contradicciones = o.get("contradiccion_por_fuente") or [0.0]
+
+            if (
+                isinstance(idx, int)
+                and not isinstance(idx, bool)
+                and 0 <= idx < len(contradicciones)
+            ):
+                contra_fuente = contradicciones[idx]
+            else:
+                contra_fuente = max(contradicciones)
+
+            contra_llm = (
+                confianza if veredicto == "contradicha" else 0.0
+            )
+
+            puntuacion = (
+                0.60 * contra_llm
+                + 0.25 * contra_fuente
+                + 0.15 * o.get("contradiccion_todas", 0.0)
+            )
+            peor = max(peor, puntuacion)
+
+        return min(1.0, peor)
+
+    def sobregeneralizacion(self, caso):
+        """
+        Penaliza cuantificadores absolutos nuevos de forma conservadora.
+        No interpreta por sí sola toda la semántica de una oración.
+        """
+        respuesta = _toks(caso["respuesta"])
+        fuentes = _toks(" ".join(caso["fuentes"]))
+
+        absolutos = {
+            "todos", "todas", "siempre", "nunca",
+            "cualquier", "cada", "all", "every",
+            "always", "never", "any", "each"
+        }
+
+        # Evitar alarmas en expresiones negativas sencillas como
+        # "no todos"; no sustituye un análisis lingüístico completo.
+        nuevos = 0
+
+        for i, palabra in enumerate(respuesta):
+            if palabra not in absolutos or palabra in fuentes:
+                continue
+
+            contexto = respuesta[max(0, i - 2):i]
+            if "no" in contexto or "ningun" in contexto:
+                continue
+
+            nuevos += 1
+
+        # Señal auxiliar: no debe decidir por sí sola el resultado.
+        return min(0.30, 0.15 * nuevos)
+
+    # --------------------------------------------------
+    # Características para la regresión logística
+    # Se conservan los nombres del modelo entrenado.
+    # --------------------------------------------------
+
+    def _features(self, caso):
+        S = caso["senales"]
+        ors = S["oraciones"]
+        frs = S["fragmentos"]
+        src = " ".join(caso["fuentes"])
+        resp = caso["respuesta"]
+        f = {}
+
+        def agg(prefijo, valores):
+            valores = valores or [0.0]
+            f[prefijo + "_min"] = min(valores)
+            f[prefijo + "_max"] = max(valores)
+            f[prefijo + "_mean"] = sum(valores) / len(valores)
+
+        llms = [o.get("llm") or {} for o in ors]
+
+        def confianza(l):
+            try:
+                return max(
+                    0.0, min(1.0, float(l.get("confianza") or 0.0))
+                )
+            except (TypeError, ValueError):
+                return 0.0
+
+        f["llm_contra"] = max(
+            [confianza(l) for l in llms
+             if l.get("veredicto") == "contradicha"] or [0.0]
+        )
+        f["llm_nores"] = max(
+            [confianza(l) for l in llms
+             if l.get("veredicto") == "no_respaldada"] or [0.0]
+        )
+        f["llm_res_minconf"] = min(
+            [confianza(l) for l in llms
+             if l.get("veredicto") == "respaldada"] or [1.0]
+        )
+        f["llm_none"] = sum(
+            1 for l in llms if l.get("veredicto") is None
+        )
+
+        agg("or_resp_todas", [
+            o["respaldo_todas"] for o in ors
+        ])
+        agg("or_contra_todas", [
+            o["contradiccion_todas"] for o in ors
+        ])
+        agg("or_best_src", [
+            max(o["respaldo_por_fuente"] or [0.0]) for o in ors
+        ])
+        agg("or_best_contra", [
+            max(o["contradiccion_por_fuente"] or [0.0]) for o in ors
+        ])
+
+        agg("fr_resp_todas", [
+            o["respaldo_todas"] for o in frs
+        ])
+        agg("fr_contra_todas", [
+            o["contradiccion_todas"] for o in frs
+        ])
+        agg("fr_best_src", [
+            max(o["respaldo_por_fuente"] or [0.0]) for o in frs
+        ])
+        agg("fr_best_contra", [
+            max(o["contradiccion_por_fuente"] or [0.0]) for o in frs
+        ])
+
+        cit = []
+        for o in ors:
+            idx = self._llm(o)[2]
+            valores = o["respaldo_por_fuente"]
+            if (
+                isinstance(idx, int)
+                and not isinstance(idx, bool)
+                and 0 <= idx < len(valores)
+            ):
+                cit.append(valores[idx])
+
+        agg("cit_resp", cit)
+        agg("or_sim", [
+            max(o["similitud_por_fuente"] or [0.0]) for o in ors
+        ])
+
+        tokens_fuente = {t[:5] for t in _toks(src)}
+        tokens_respuesta = [
+            t for t in _toks(resp)
+            if t not in STOP and not t.isdigit()
+        ]
+
+        f["nov_frac"] = (
+            sum(1 for t in tokens_respuesta
+                if t[:5] not in tokens_fuente)
+            / max(1, len(tokens_respuesta))
+        )
+
+        fuente_citada = self._fuentes_citadas(caso)
+        tokens_citados = {t[:5] for t in _toks(fuente_citada)}
+
+        f["novc_frac"] = (
+            sum(1 for t in tokens_respuesta
+                if t[:5] not in tokens_citados)
+            / max(1, len(tokens_respuesta))
+        )
+
+        nums_respuesta = _nums(resp)
+        nums_fuente = _nums(src)
+        nums_citados = _nums(fuente_citada)
+
+        f["num_miss"] = len(nums_respuesta - nums_fuente)
+        f["num_miss_cit"] = len(nums_respuesta - nums_citados)
+        f["num_all_in_cit"] = float(
+            bool(nums_respuesta)
+            and not (nums_respuesta - nums_citados)
+        )
+
+        rt = set(_toks(resp))
+        ct = set(_toks(fuente_citada))
+        f["q_down_lost"] = len((ct & FQ_DOWN) - rt)
+
+        caps = {
+            _norm(w)
+            for w in re.findall(
+                r"(?<!^)(?<![.¿¡] )\b[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+",
+                resp
+            )
+        }
+        tokens_fuente_norm = set(_toks(src))
+        f["cap_new"] = sum(
+            1 for w in caps if w not in tokens_fuente_norm
+        )
+
+        f["det_dist"] = self.distorsion(caso)
+        f["det_contra"] = self.contradiccion(caso)
+        f["det_nores"] = self.no_respaldado(caso)
+        f["det_sobre"] = self.sobregeneralizacion(caso)
+
+        return f
+
+    # --------------------------------------------------
+    # Puntuación final
+    # --------------------------------------------------
+
+    def score(self, caso) -> float:
+        f = self._features(caso)
+        z = MODELO["b"]
+
+        for k, mu, sd, w in zip(
+            MODELO["keys"],
+            MODELO["mu"],
+            MODELO["sd"],
+            MODELO["coef"]
+        ):
+            # Evitar divisiones por cero en modelos modificados.
+            sd = sd if sd else 1.0
+            z += w * (f[k] - mu) / sd
+
+        T = MODELO.get("T", 0.2)
+        T = max(1e-6, min(1.0 - 1e-6, T))
+
+        # Traslada el umbral original T a 0.5.
+        z -= math.log(T / (1.0 - T))
+        z = max(-30.0, min(30.0, z))
+
+        return 1.0 / (1.0 + math.exp(-z))
+
