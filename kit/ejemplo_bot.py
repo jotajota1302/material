@@ -20,9 +20,23 @@ que falla cuando una respuesta fiel combina datos de varias fuentes.
 
 
 class Guardian:
+
+    def reescalar_score(self, score_original):
+        umbral_bot = 0.167
+
+        if score_original < umbral_bot:
+            return (score_original / umbral_bot) * 0.5
+        else:
+            return 0.5 + ((score_original - umbral_bot) / (1.0 - umbral_bot)) * 0.5
+
     def score(self, caso):
         peor_respaldo = 1.0
         for oracion in caso["senales"]["oraciones"]:
             mejor_fuente = max(oracion["respaldo_por_fuente"], default=0.0)
             peor_respaldo = min(peor_respaldo, mejor_fuente)
-        return 1.0 - peor_respaldo
+        
+        # 1. Calculamos la probabilidad original de alucinación
+        score_original = 1.0 - peor_respaldo
+        
+        # 2. La reescalamos usando self. y la devolvemos
+        return self.reescalar_score(score_original)
